@@ -1,49 +1,35 @@
 #!/usr/bin/env python
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-
-from builtins import str
-
-from future import standard_library
-standard_library.install_aliases()
-
+from jsonrpclib import Server
+from tld import get_tld
 import dns.exception
 import dns.resolver
 import logging
 import os
-import requests
 import sys
 import time
 
-from tld import get_tld
-
-# Enable verified HTTPS requests on older Pythons
-# http://urllib3.readthedocs.org/en/latest/security.html
-if sys.version_info[0] == 2:
-    requests.packages.urllib3.contrib.pyopenssl.inject_into_urllib3()
+memkey = os.environ['MEMSET_KEY']
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.INFO)
 
 try:
-    CF_HEADERS = {
-        'X-Auth-Email': os.environ['CF_EMAIL'],
-        'X-Auth-Key'  : os.environ['CF_KEY'],
-        'Content-Type': 'application/json',
-    }
+    memkey = os.environ['MEMSET_KEY']
 except KeyError:
-    logger.error(" + Unable to locate Cloudflare credentials in environment!")
+    logger.error(" + Unable to locate Memset credentials in environment!")
     sys.exit(1)
 
 try:
-    dns_servers = os.environ['CF_DNS_SERVERS']
+    dns_servers = os.environ['DNS_SERVERS']
     dns_servers = dns_servers.split()
 except KeyError:
     dns_servers = False
+
+uri = "https://%s:@api.memset.com/v1/jsonrpc/" % memkey
+
+s = Server(uri)
+
 
 def _has_dns_propagated(name, token):
     txt_records = []
@@ -57,7 +43,7 @@ def _has_dns_propagated(name, token):
         for rdata in dns_response:
             for txt_record in rdata.strings:
                 txt_records.append(txt_record)
-    except dns.exception.DNSException as error:
+    except dns.exception.DNSException:
         return False
 
     for txt_record in txt_records:
@@ -67,56 +53,70 @@ def _has_dns_propagated(name, token):
     return False
 
 
-# https://api.cloudflare.com/#zone-list-zones
+# https://www.memset.com/apidocs/methods_dns.html#dns.zone_domain_list
 def _get_zone_id(domain):
     tld = get_tld('http://' + domain)
-    url = "https://api.cloudflare.com/client/v4/zones?name={0}".format(tld)
-    r = requests.get(url, headers=CF_HEADERS)
-    r.raise_for_status()
-    return r.json()['result'][0]['id']
+    r = s.dns.zone_domain_list()
+    for zone in r:
+        if zone["domain"] == tld:
+            return zone["zone_id"]
 
 
-# https://api.cloudflare.com/#dns-records-for-a-zone-dns-record-details
+def _strip_domain(fqdn):
+    tld = get_tld('http://' + fqdn)
+    return fqdn.replace(".%s" % tld, "")
+
+
+# https://www.memset.com/apidocs/methods_dns.html#dns.zone_info
 def _get_txt_record_id(zone_id, name, token):
-    url = "https://api.cloudflare.com/client/v4/zones/{0}/dns_records?type=TXT&name={1}&content={2}".format(zone_id, name, token)
-    r = requests.get(url, headers=CF_HEADERS)
-    r.raise_for_status()
+    r = s.dns.zone_info(id=zone_id)
     try:
-        record_id = r.json()['result'][0]['id']
+        for record in r["records"]:
+            if record["address"] == token:
+                if record["record"] == name:
+                    record_id = record["id"]
     except IndexError:
-        logger.info(" + Unable to locate record named {0}".format(name))
+        logger.info(" + Unable to locate record named %s" % name)
         return
 
-    return record_id
+    try:
+        return record_id
+    except UnboundLocalError:
+        return
+
+    return
 
 
-# https://api.cloudflare.com/#dns-records-for-a-zone-create-dns-record
+# https://www.memset.com/apidocs/methods_dns.html#dns.zone_record_create
 def create_txt_record(args):
     domain, token = args[0], args[2]
     zone_id = _get_zone_id(domain)
-    name = "{0}.{1}".format('_acme-challenge', domain)
-    url = "https://api.cloudflare.com/client/v4/zones/{0}/dns_records".format(zone_id)
-    payload = {
-        'type': 'TXT',
-        'name': name,
-        'content': token,
-        'ttl': 1,
-    }
-    r = requests.post(url, headers=CF_HEADERS, json=payload)
-    r.raise_for_status()
-    record_id = r.json()['result']['id']
-    logger.debug("+ TXT record created, ID: {0}".format(record_id))
+
+    fqdn = "%s.%s" % ('_acme-challenge', domain)
+    name = _strip_domain(fqdn)
+
+    r = s.dns.zone_record_create(zone_id=zone_id, type="TXT", record=name, address=token)
+    record_id = r['id']
+    logger.debug(" ++ TXT record created, ID: %s" % record_id)
+
+    r = s.dns.reload()
+    reload_id = r['id']
+    logger.info(" + Waiting 10s for DNS reload to complete....")
+    time.sleep(10)
+    while not s.job.status(id=reload_id)["finished"]:
+        logger.info(" + Reload not complete. Waiting another 10s....")
+        time.sleep(10)
 
     # give it 10 seconds to settle down and avoid nxdomain caching
     logger.info(" + Settling down for 10s...")
     time.sleep(10)
 
-    while(_has_dns_propagated(name, token) == False):
+    while not _has_dns_propagated(name, token):
         logger.info(" + DNS not propagated, waiting 30s...")
         time.sleep(30)
 
 
-# https://api.cloudflare.com/#dns-records-for-a-zone-delete-dns-record
+# https://www.memset.com/apidocs/methods_dns.html#dns.zone_record_delete
 def delete_txt_record(args):
     domain, token = args[0], args[2]
     if not domain:
@@ -124,32 +124,37 @@ def delete_txt_record(args):
         return
 
     zone_id = _get_zone_id(domain)
-    name = "{0}.{1}".format('_acme-challenge', domain)
+
+    fqdn = "%s.%s" % ('_acme-challenge', domain)
+    name = _strip_domain(fqdn)
+
     record_id = _get_txt_record_id(zone_id, name, token)
 
-    logger.debug(" + Deleting TXT record name: {0}".format(name))
-    url = "https://api.cloudflare.com/client/v4/zones/{0}/dns_records/{1}".format(zone_id, record_id)
-    r = requests.delete(url, headers=CF_HEADERS)
-    r.raise_for_status()
+    logger.debug(" ++ Deleting TXT record name: %s" % name)
+
+    s.dns.zone_record_delete(id=record_id)
 
 
 def deploy_cert(args):
     domain, privkey_pem, cert_pem, fullchain_pem, chain_pem, timestamp = args
-    logger.info(' + ssl_certificate: {0}'.format(fullchain_pem))
-    logger.info(' + ssl_certificate_key: {0}'.format(privkey_pem))
+    logger.info(' + ssl_certificate: %s' % fullchain_pem)
+    logger.info(' + ssl_certificate_key: %s' % privkey_pem)
     return
+
 
 def unchanged_cert(args):
     return
 
+
 def main(argv):
     ops = {
         'deploy_challenge': create_txt_record,
-        'clean_challenge' : delete_txt_record,
-        'deploy_cert'     : deploy_cert,
-        'unchanged_cert'  : unchanged_cert,
+        'clean_challenge': delete_txt_record,
+        'deploy_cert': deploy_cert,
+        'unchanged_cert': unchanged_cert,
     }
-    logger.info(" + CloudFlare hook executing: {0}".format(argv[0]))
+    logger.info(" + Memset hook executing: %s" % argv[0])
+
     ops[argv[0]](argv[1:])
 
 

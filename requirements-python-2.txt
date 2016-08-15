@@ -13,3 +13,4 @@ requests==2.9.1
 six==1.10.0
 tld==0.7.6
 wheel==0.28.0
+jsonrpclib==0.1.7
