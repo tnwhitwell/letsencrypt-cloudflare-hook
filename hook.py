@@ -111,7 +111,7 @@ def create_txt_record(args):
     logger.info(" + Settling down for 10s...")
     time.sleep(10)
 
-    while not _has_dns_propagated(name, token):
+    while not _has_dns_propagated(fqdn, token):
         logger.info(" + DNS not propagated, waiting 30s...")
         time.sleep(30)
 

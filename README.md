@@ -20,7 +20,7 @@ $ pip install -r hooks/cloudflare/requirements-python-2.txt
 
 ## Configuration
 
-Your account's Memset API key are expected to be in the environment, so make sure to:
+Your Memset account's [API key](https://www.memset.com/control/api/keys/) is expected to be in the environment, so make sure to:
 
 ```
 $ export MEMSET_KEY='K9uX2HyUjeWg5AhAb'
