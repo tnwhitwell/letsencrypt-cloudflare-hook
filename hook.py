@@ -142,20 +142,17 @@ def deploy_cert(args):
     return
 
 
-def unchanged_cert(args):
-    return
-
-
 def main(argv):
     ops = {
         'deploy_challenge': create_txt_record,
         'clean_challenge': delete_txt_record,
         'deploy_cert': deploy_cert,
-        'unchanged_cert': unchanged_cert,
     }
     logger.info(" + Memset hook executing: %s" % argv[0])
-
-    ops[argv[0]](argv[1:])
+    try:
+        ops[argv[0]](argv[1:])
+    except KeyError:
+        pass #ignore as this is likely not required
 
 
 if __name__ == '__main__':
